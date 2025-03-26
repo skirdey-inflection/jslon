@@ -1926,21 +1926,9 @@ impl eframe::App for JsonlViewer {
                     let view_bottom = scroll_offset + self.viewport_height + BUFFER_HEIGHT;
 
                     let start_row = self.row_at_height(view_top);
-                    let end_row = self.row_at_height(view_bottom) + 1;
+                    let end_row = self.row_at_height(view_bottom) + 1; // +1
 
-                    let mut clamped_end_row = end_row.min(self.total_rows);
-
-                    let render_limit = if self.file_size > 10_000_000_000 {
-                        50
-                    } else if self.file_size > 1_000_000_000 {
-                        100
-                    } else {
-                        300
-                    };
-
-                    if clamped_end_row > start_row + render_limit {
-                        clamped_end_row = start_row + render_limit;
-                    }
+                    let clamped_end_row = end_row.min(self.total_rows); // Keep this clamp
 
                     self.visible_range = (start_row, clamped_end_row);
 
