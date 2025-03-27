@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JSLON - Blazing Fast JSONL File Viewer</title>
+    <style>
+        :root {
+            --primary-color: #3498db;
+            --secondary-color: #2980b9;
+            --text-color: #333;
+            --bg-color: #f9f9f9;
+            --card-bg: #ffffff;
+            --card-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            --section-padding: 4rem 2rem;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: var(--text-color);
+            background-color: var(--bg-color);
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 2rem;
+        }
+
+        header {
+            background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+            color: white;
+            padding: 6rem 0 4rem;
+            text-align: center;
+        }
+
+        .logo {
+            font-size: 3.5rem;
+            font-weight: 700;
+            margin-bottom: 1rem;
+            letter-spacing: -0.5px;
+        }
+
+        .tagline {
+            font-size: 1.5rem;
+            margin-bottom: 2rem;
+            opacity: 0.9;
+        }
+
+        .btn {
+            display: inline-block;
+            background-color: white;
+            color: var(--primary-color);
+            padding: 0.8rem 1.8rem;
+            border-radius: 2rem;
+            text-decoration: none;
+            font-weight: 600;
+            transition: all 0.3s ease;
+            margin: 0.5rem;
+            border: none;
+            cursor: pointer;
+        }
+
+        .btn:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 10px 20px rgba(0, 0, 0, 0.1);
+        }
+
+        .btn-github {
+            background-color: #24292e;
+            color: white;
+        }
+
+        section {
+            padding: var(--section-padding);
+        }
+
+        .section-title {
+            text-align: center;
+            margin-bottom: 3rem;
+            font-size: 2.2rem;
+            position: relative;
+        }
+
+        .section-title::after {
+            content: '';
+            display: block;
+            width: 80px;
+            height: 4px;
+            background-color: var(--primary-color);
+            margin: 1rem auto 0;
+            border-radius: 2px;
+        }
+
+        .features {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 2rem;
+        }
+
+        .feature-card {
+            background-color: var(--card-bg);
+            border-radius: 8px;
+            padding: 2rem;
+            text-align: center;
+            box-shadow: var(--card-shadow);
+            transition: transform 0.3s ease;
+        }
+
+        .feature-card:hover {
+            transform: translateY(-5px);
+        }
+
+        .feature-icon {
+            font-size: 3rem;
+            margin-bottom: 1.5rem;
+            color: var(--primary-color);
+        }
+
+        .feature-title {
+            font-size: 1.2rem;
+            margin-bottom: 1rem;
+        }
+
+        .download-section {
+            background-color: var(--primary-color);
+            color: white;
+            text-align: center;
+        }
+
+        .download-platforms {
+            display: flex;
+            justify-content: center;
+            flex-wrap: wrap;
+            gap: 2rem;
+            margin-top: 2rem;
+        }
+
+        .download-card {
+            background-color: white;
+            border-radius: 8px;
+            padding: 2rem;
+            width: 250px;
+            text-align: center;
+            box-shadow: var(--card-shadow);
+        }
+
+        .platform-icon {
+            font-size: 3rem;
+            margin-bottom: 1rem;
+            color: var(--primary-color);
+        }
+
+        .platform-name {
+            font-size: 1.2rem;
+            color: var(--text-color);
+            margin-bottom: 1.5rem;
+        }
+
+        .usage-cards {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 2rem;
+            margin-top: 3rem;
+        }
+
+        .usage-card {
+            background-color: var(--card-bg);
+            border-radius: 8px;
+            padding: 2rem;
+            box-shadow: var(--card-shadow);
+        }
+
+        .usage-icon {
+            font-size: 2rem;
+            color: var(--primary-color);
+            margin-bottom: 1rem;
+        }
+
+        .usage-title {
+            font-size: 1.2rem;
+            margin-bottom: 1rem;
+        }
+
+        .build-steps {
+            background-color: var(--card-bg);
+            border-radius: 8px;
+            padding: 2rem;
+            box-shadow: var(--card-shadow);
+            margin-top: 2rem;
+        }
+
+        .code-block {
+            background-color: #272822;
+            color: #f8f8f2;
+            padding: 1rem;
+            border-radius: 4px;
+            font-family: 'Courier New', Courier, monospace;
+            overflow-x: auto;
+            margin: 1rem 0;
+        }
+
+        footer {
+            background-color: #24292e;
+            color: white;
+            padding: 2rem;
+            text-align: center;
+        }
+
+        .footer-links a {
+            color: white;
+            text-decoration: none;
+            margin: 0 1rem;
+        }
+
+        .footer-links a:hover {
+            text-decoration: underline;
+        }
+
+        @media (max-width: 768px) {
+            .logo {
+                font-size: 2.5rem;
+            }
+
+            .tagline {
+                font-size: 1.2rem;
+            }
+
+            section {
+                padding: 3rem 1rem;
+            }
+
+            .section-title {
+                font-size: 1.8rem;
+            }
+
+            .download-platforms {
+                flex-direction: column;
+                align-items: center;
+            }
+
+            .download-card {
+                width: 100%;
+                max-width: 300px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="container">
+            <div class="logo">JSLON</div>
+            <div class="tagline">A blazing fast, memory-efficient viewer for large JSONL files</div>
+            <div>
+                <a href="https://github.com/skirdey-inflection/jslon" class="btn btn-github">View on GitHub</a>
+                <a href="#download" class="btn">Download Now</a>
+            </div>
+        </div>
+    </header>
+
+    <section id="features">
+        <div class="container">
+            <h2 class="section-title">Features</h2>
+            <div class="features">
+                <div class="feature-card">
+                    <div class="feature-icon">⚡</div>
+                    <h3 class="feature-title">Virtualized Rendering</h3>
+                    <p>Only visible rows are processed, making it efficient for gigabyte-sized files</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">🚀</div>
+                    <h3 class="feature-title">Memory-Mapped File Access</h3>
+                    <p>Files are loaded instantly regardless of size</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">🔍</div>
+                    <h3 class="feature-title">Smart Search</h3>
+                    <p>Fast keyword search with term highlighting and navigation</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">📊</div>
+                    <h3 class="feature-title">Collapsible Rows</h3>
+                    <p>Expand only the entries you care about</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">🌓</div>
+                    <h3 class="feature-title">Dark/Light Mode</h3>
+                    <p>Choose your preferred theme</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section id="download" class="download-section">
+        <div class="container">
+            <h2 class="section-title">Download</h2>
+            <p>Download the latest version of JSLON for your operating system</p>
+            <div class="download-platforms">
+                <div class="download-card">
+                    <div class="platform-icon">🐧</div>
+                    <div class="platform-name">Linux</div>
+                    <a href="#" class="btn">Download .deb</a>
+                    <br>
+                    <a href="#" class="btn" style="margin-top: 10px;">Download .rpm</a>
+                </div>
+                <div class="download-card">
+                    <div class="platform-icon">🍎</div>
+                    <div class="platform-name">macOS</div>
+                    <a href="#" class="btn">Download .app</a>
+                </div>
+                <div class="download-card">
+                    <div class="platform-icon">🪟</div>
+                    <div class="platform-name">Windows</div>
+                    <a href="#" class="btn">Download .msi</a>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section id="usage">
+        <div class="container">
+            <h2 class="section-title">Usage Guide</h2>
+            <div class="usage-cards">
+                <div class="usage-card">
+                    <div class="usage-icon">📂</div>
+                    <h3 class="usage-title">Opening Files</h3>
+                    <p>Click the "📂 Open File" button and select a JSONL file. The file will be loaded instantly, even for very large files.</p>
+                </div>
+                <div class="usage-card">
+                    <div class="usage-icon">🔍</div>
+                    <h3 class="usage-title">Search</h3>
+                    <p>Click "🔍 Search" to open the search bar. Enter your search term and press Enter or click "Find". Use "↑ Prev" and "↓ Next" buttons to navigate between matches.</p>
+                </div>
+                <div class="usage-card">
+                    <div class="usage-icon">📊</div>
+                    <h3 class="usage-title">Navigation</h3>
+                    <p>Use the scroll wheel to navigate through the file. Click "►" to expand a row and "▼" to collapse it. "Expand All" expands visible rows, and "Collapse All" collapses all rows.</p>
+                </div>
+                <div class="usage-card">
+                    <div class="usage-icon">🌓</div>
+                    <h3 class="usage-title">View Options</h3>
+                    <p>Toggle between dark and light themes with the "🌙 Dark" / "☀ Light" button for your viewing comfort.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section id="build">
+        <div class="container">
+            <h2 class="section-title">Building from Source</h2>
+            <p>JSLON is open source. You can build it from source using Rust and Cargo.</p>
+            
+            <div class="build-steps">
+                <h3>Requirements</h3>
+                <ul>
+                    <li>Rust 1.60 or later</li>
+                    <li>Cargo</li>
+                </ul>
+                
+                <h3>Quick Start</h3>
+                <div class="code-block">
+                    <pre># Clone the repository
+git clone https://github.com/skirdey-inflection/jslon
+cd jslon
+
+# Build in debug mode
+cargo build
+
+# Run the application
+cargo run</pre>
+                </div>
+                
+                <h3>Build Release Version</h3>
+                <div class="code-block">
+                    <pre>cargo build --release</pre>
+                </div>
+                <p>The executable will be available at <code>target/release/jslon</code> (or <code>jslon.exe</code> on Windows).</p>
+                
+                <h3>Packaging as Application</h3>
+                <p>We use cargo-bundle for creating application bundles on all platforms.</p>
+                
+                <h4>Install cargo-bundle</h4>
+                <div class="code-block">
+                    <pre>cargo install cargo-bundle</pre>
+                </div>
+                
+                <h4>Create Bundles</h4>
+                
+                <p>macOS:</p>
+                <div class="code-block">
+                    <pre>cargo bundle --release</pre>
+                </div>
+                
+                <p>Linux (Debian/Ubuntu):</p>
+                <div class="code-block">
+                    <pre>cargo bundle --format deb</pre>
+                </div>
+                
+                <p>Linux (RPM-based distributions):</p>
+                <div class="code-block">
+                    <pre>cargo bundle --format rpm</pre>
+                </div>
+                
+                <p>Windows:</p>
+                <div class="code-block">
+                    <pre>cargo bundle --format msi</pre>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <footer>
+        <div class="container">
+            <p>© 2025 JSLON - A project by skirdey-inflection</p>
+            <div class="footer-links">
+                <a href="https://github.com/skirdey-inflection/jslon">GitHub</a>
+                <a href="https://github.com/skirdey-inflection/jslon/issues">Report Issues</a>
+                <a href="https://github.com/skirdey-inflection/jslon/blob/main/LICENSE">License</a>
+            </div>
+        </div>
+    </footer>
+
+    <script>
+        // Simple script to handle smooth scrolling for anchor links
+        document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+            anchor.addEventListener('click', function (e) {
+                e.preventDefault();
+                document.querySelector(this.getAttribute('href')).scrollIntoView({
+                    behavior: 'smooth'
+                });
+            });
+        });
+    </script>
+</body>
+</html>
