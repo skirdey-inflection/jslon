@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -253,14 +254,15 @@
         }
     </style>
 </head>
+
 <body>
     <header>
         <div class="container">
             <div class="logo">JSLON</div>
-            <div class="tagline">A blazing fast, memory-efficient viewer for large JSONL files</div>
+            <div class="tagline">A blazing fast, memory-efficient viewer for large JSONL, CSV and TSV files</div>
             <div>
                 <a href="https://github.com/skirdey-inflection/jslon" class="btn btn-github">View on GitHub</a>
-                <a href="#download" class="btn">Download Now</a>
+                <!-- <a href="#download" class="btn">Download Now</a> -->
             </div>
         </div>
     </header>
@@ -297,7 +299,7 @@
             </div>
         </div>
     </section>
-
+    <!-- 
     <section id="download" class="download-section">
         <div class="container">
             <h2 class="section-title">Download</h2>
@@ -322,48 +324,20 @@
                 </div>
             </div>
         </div>
-    </section>
-
-    <section id="usage">
-        <div class="container">
-            <h2 class="section-title">Usage Guide</h2>
-            <div class="usage-cards">
-                <div class="usage-card">
-                    <div class="usage-icon">📂</div>
-                    <h3 class="usage-title">Opening Files</h3>
-                    <p>Click the "📂 Open File" button and select a JSONL file. The file will be loaded instantly, even for very large files.</p>
-                </div>
-                <div class="usage-card">
-                    <div class="usage-icon">🔍</div>
-                    <h3 class="usage-title">Search</h3>
-                    <p>Click "🔍 Search" to open the search bar. Enter your search term and press Enter or click "Find". Use "↑ Prev" and "↓ Next" buttons to navigate between matches.</p>
-                </div>
-                <div class="usage-card">
-                    <div class="usage-icon">📊</div>
-                    <h3 class="usage-title">Navigation</h3>
-                    <p>Use the scroll wheel to navigate through the file. Click "►" to expand a row and "▼" to collapse it. "Expand All" expands visible rows, and "Collapse All" collapses all rows.</p>
-                </div>
-                <div class="usage-card">
-                    <div class="usage-icon">🌓</div>
-                    <h3 class="usage-title">View Options</h3>
-                    <p>Toggle between dark and light themes with the "🌙 Dark" / "☀ Light" button for your viewing comfort.</p>
-                </div>
-            </div>
-        </div>
-    </section>
+    </section> -->
 
     <section id="build">
         <div class="container">
             <h2 class="section-title">Building from Source</h2>
             <p>JSLON is open source. You can build it from source using Rust and Cargo.</p>
-            
+
             <div class="build-steps">
                 <h3>Requirements</h3>
                 <ul>
                     <li>Rust 1.60 or later</li>
                     <li>Cargo</li>
                 </ul>
-                
+
                 <h3>Quick Start</h3>
                 <div class="code-block">
                     <pre># Clone the repository
@@ -371,47 +345,48 @@ git clone https://github.com/skirdey-inflection/jslon
 cd jslon
 
 # Build in debug mode
-cargo build
+cargo build --release
 
 # Run the application
-cargo run</pre>
+cargo run --release</pre>
                 </div>
-                
+
                 <h3>Build Release Version</h3>
                 <div class="code-block">
                     <pre>cargo build --release</pre>
                 </div>
-                <p>The executable will be available at <code>target/release/jslon</code> (or <code>jslon.exe</code> on Windows).</p>
-                
-                <h3>Packaging as Application</h3>
+                <p>The executable will be available at <code>target/release/jslon</code> (or <code>jslon.exe</code> on
+                    Windows).</p>
+
+                <!-- <h3>Packaging as Application</h3>
                 <p>We use cargo-bundle for creating application bundles on all platforms.</p>
-                
+
                 <h4>Install cargo-bundle</h4>
                 <div class="code-block">
                     <pre>cargo install cargo-bundle</pre>
                 </div>
-                
+
                 <h4>Create Bundles</h4>
-                
+
                 <p>macOS:</p>
                 <div class="code-block">
                     <pre>cargo bundle --release</pre>
                 </div>
-                
+
                 <p>Linux (Debian/Ubuntu):</p>
                 <div class="code-block">
                     <pre>cargo bundle --format deb</pre>
                 </div>
-                
+
                 <p>Linux (RPM-based distributions):</p>
                 <div class="code-block">
                     <pre>cargo bundle --format rpm</pre>
                 </div>
-                
+
                 <p>Windows:</p>
                 <div class="code-block">
                     <pre>cargo bundle --format msi</pre>
-                </div>
+                </div> -->
             </div>
         </div>
     </section>
@@ -439,4 +414,5 @@ cargo run</pre>
         });
     </script>
 </body>
+
 </html>
