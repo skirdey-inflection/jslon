@@ -1,13 +1,14 @@
 #![allow(clippy::collapsible_else_if)]
 
-use csv::{Position, ReaderBuilder};
+use csv::{ReaderBuilder, StringRecord};
 use eframe::egui::{self, RichText, Ui};
-use egui::{CornerRadius, Frame};
+use egui::{CornerRadius, Frame, UiBuilder};
 use memmap2::Mmap;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
-use std::io::{self, BufReader, Read};
+use std::io::{self, BufRead, BufReader};
+use std::path::Path;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -80,12 +81,6 @@ struct CacheEntry {
     last_access: Instant,
 }
 
-struct IndexBlock {
-    start_idx: usize,
-    positions: Vec<Position>,
-    last_access: Instant,
-}
-
 trait FormatReader: Send + Sync {
     fn total_records(&self) -> usize;
     fn get_record(&self, index: usize) -> Option<String>;
@@ -98,30 +93,131 @@ trait FormatReader: Send + Sync {
     fn estimate_parsed_height(&self, index: usize, text_wrapping: bool, max_width: f32) -> f32;
 }
 
-struct JsonlReader {
+struct UnifiedReader {
     mmap: Arc<Mmap>,
     offsets: Arc<Vec<usize>>,
     file_format: FileFormat,
+    header: Option<Vec<String>>,
+
+    // Cache for parsed records
+    record_cache: Arc<Mutex<HashMap<usize, CacheEntry>>>,
+    cache_access_queue: Arc<Mutex<VecDeque<usize>>>,
+
+    file_size: u64,
 }
 
-impl JsonlReader {
-    fn new(file: &File) -> io::Result<Self> {
+impl UnifiedReader {
+    fn new(file: &File, file_path: &str, format: FileFormat) -> io::Result<Self> {
+        let metadata = file.metadata()?;
+        let file_size = metadata.len();
+
+        // Memory map the file for efficient access
         let mmap = unsafe { Mmap::map(file)? };
         let mmap_arc = Arc::new(mmap);
 
-        let offsets = Arc::new(JsonlReader::build_offsets(&mmap_arc));
+        // Build line offsets index - use format-specific method for CSV/TSV
+        let offsets = match format {
+            FileFormat::CSV | FileFormat::TSV => {
+                let delimiter = format.delimiter().unwrap_or(b',');
+                Arc::new(Self::build_csv_offsets(&mmap_arc, delimiter))
+            }
+            _ => Arc::new(Self::build_offsets(&mmap_arc)),
+        };
+
+        // Initialize header for CSV/TSV files
+        let header = match format {
+            FileFormat::CSV | FileFormat::TSV => {
+                let delimiter = format.delimiter().unwrap_or(b',');
+                Self::detect_header(file_path, delimiter)?
+            }
+            _ => None,
+        };
 
         Ok(Self {
             mmap: mmap_arc,
             offsets,
-            file_format: FileFormat::JSONL,
+            file_format: format,
+            header,
+            record_cache: Arc::new(Mutex::new(HashMap::new())),
+            cache_access_queue: Arc::new(Mutex::new(VecDeque::new())),
+            file_size,
         })
+    }
+
+    // Add this new method to the UnifiedReader implementation
+    fn build_csv_offsets(mmap: &Mmap, delimiter: u8) -> Vec<usize> {
+        let mut offsets = vec![0];
+        let mut in_quotes = false;
+        let quote_char = b'"'; // Standard quote character for CSV
+
+        const CHUNK_SIZE: usize = 1024 * 1024; // Process in 1MB chunks
+
+        let mut chunk_start = 0;
+        while chunk_start < mmap.len() {
+            let chunk_end = std::cmp::min(chunk_start + CHUNK_SIZE, mmap.len());
+            let chunk = &mmap[chunk_start..chunk_end];
+
+            let mut pos = 0;
+            while pos < chunk.len() {
+                let c = chunk[pos];
+
+                // Handle quotes - toggle quote state if not escaped
+                if c == quote_char {
+                    // Check for escaped quotes (two quotes in a row)
+                    if in_quotes && pos + 1 < chunk.len() && chunk[pos + 1] == quote_char {
+                        // Skip the second quote (escaped quote)
+                        pos += 1;
+                    } else {
+                        // Toggle quote state
+                        in_quotes = !in_quotes;
+                    }
+                }
+                // Only treat newlines as record separators when not in quotes
+                else if (c == b'\n'
+                    || (c == b'\r' && pos + 1 < chunk.len() && chunk[pos + 1] == b'\n'))
+                    && !in_quotes
+                {
+                    let nl_adjust =
+                        if c == b'\r' && pos + 1 < chunk.len() && chunk[pos + 1] == b'\n' {
+                            // For CRLF, skip both characters
+                            pos += 1;
+                            2
+                        } else {
+                            // For LF only
+                            1
+                        };
+
+                    let abs_pos = chunk_start + pos + nl_adjust;
+                    if abs_pos <= mmap.len() {
+                        offsets.push(abs_pos);
+                    }
+                }
+
+                pos += 1;
+            }
+
+            // Note: in_quotes state persists across chunks automatically
+            chunk_start = chunk_end;
+        }
+
+        // Safety check: if we end the file still in quotes, we might have malformed CSV
+        // In this case, we'll just add the end of file as the final offset
+        if offsets.last().map_or(true, |&off| off < mmap.len()) {
+            offsets.push(mmap.len());
+        }
+
+        // Remove duplicate at the end if present
+        if offsets.len() >= 2 && offsets[offsets.len() - 1] == offsets[offsets.len() - 2] {
+            offsets.pop();
+        }
+
+        offsets
     }
 
     fn build_offsets(mmap: &Mmap) -> Vec<usize> {
         let mut offsets = vec![0];
 
-        const CHUNK_SIZE: usize = 1024 * 1024;
+        const CHUNK_SIZE: usize = 1024 * 1024; // Process in 1MB chunks
 
         let mut chunk_start = 0;
         while chunk_start < mmap.len() {
@@ -141,57 +237,55 @@ impl JsonlReader {
             chunk_start = chunk_end;
         }
 
-        if let Some(&last_offset) = offsets.last() {
-            if last_offset < mmap.len() {
-
-                /* Alternative build_offsets ending:
-                   offsets.push(0);
-                   for pos in memchr::memchr_iter(b'\n', &mmap) {
-                       offsets.push(pos + 1);
-                   }
-
-                   if let Some(&last_start) = offsets.last() {
-                       if last_start < mmap.len() {
-
-
-
-                       }
-                   }
-
-
-
-
-                */
-            }
-        }
-
+        // Ensure the last offset is included if needed
         if offsets.last().map_or(true, |&off| off < mmap.len()) {
             offsets.push(mmap.len());
         }
 
+        // Remove duplicate at the end if present
         if offsets.len() >= 2 && offsets[offsets.len() - 1] == offsets[offsets.len() - 2] {
             offsets.pop();
         }
 
         offsets
     }
-}
 
-impl FormatReader for JsonlReader {
-    fn total_records(&self) -> usize {
-        if self.offsets.len() < 2 {
-            0
-        } else {
-            self.offsets.len() - 1
+    fn detect_header(file_path: &str, delimiter: u8) -> io::Result<Option<Vec<String>>> {
+        // Try to read headers using CSV reader
+        let file = File::open(file_path)?;
+
+        let mut reader = ReaderBuilder::new()
+            .delimiter(delimiter)
+            .has_headers(true)
+            .quoting(true)
+            .double_quote(true)
+            .escape(Some(b'\\'))
+            .flexible(true)
+            .from_reader(BufReader::new(file));
+
+        match reader.headers() {
+            Ok(headers) => Ok(Some(headers.iter().map(|s| s.to_string()).collect())),
+            Err(_) => {
+                // Fallback: read first line and check if it contains delimiters
+                let file = File::open(file_path)?;
+                let mut buf_reader = BufReader::new(file);
+                let mut first_line = String::new();
+                if buf_reader.read_line(&mut first_line).is_ok() && !first_line.is_empty() {
+                    // Just return None as we can't properly parse headers
+                    Ok(None)
+                } else {
+                    Ok(None)
+                }
+            }
         }
     }
 
-    fn get_record(&self, index: usize) -> Option<String> {
+    fn get_raw_line(&self, index: usize) -> Option<String> {
         if index + 1 < self.offsets.len() {
             let start = self.offsets[index];
+            let end = self.offsets[index + 1];
 
-            let end = std::cmp::min(self.offsets[index + 1], self.mmap.len());
-
+            // Trim trailing newlines
             let mut actual_end = end;
             while actual_end > start
                 && (self.mmap[actual_end - 1] == b'\n' || self.mmap[actual_end - 1] == b'\r')
@@ -210,425 +304,75 @@ impl FormatReader for JsonlReader {
         None
     }
 
-    fn get_parsed_record(&self, index: usize) -> Option<Vec<String>> {
-        self.get_record(index).map(|s| vec![s])
-    }
-
-    fn is_match(&self, index: usize, term: &str, case_sensitive: bool) -> bool {
-        if let Some(line) = self.get_record(index) {
-            if case_sensitive {
-                line.contains(term)
-            } else {
-                line.to_lowercase().contains(&term.to_lowercase())
-            }
-        } else {
-            false
-        }
-    }
-
-    fn has_header(&self) -> bool {
-        false
-    }
-
-    fn get_header(&self) -> Option<Vec<String>> {
-        None
-    }
-
-    fn format(&self) -> FileFormat {
-        self.file_format
-    }
-
-    fn preload_around(&self, _index: usize) {}
-
-    fn estimate_parsed_height(&self, _index: usize, _text_wrapping: bool, _max_width: f32) -> f32 {
-        EXPANDED_JSON_HEIGHT
-    }
-}
-
-struct HighPerfTsvReader {
-    file_path: String,
-    delimiter: u8,
-    header: Option<Vec<String>>,
-
-    index_blocks: Arc<Mutex<HashMap<usize, IndexBlock>>>,
-    block_access_queue: Arc<Mutex<VecDeque<usize>>>,
-
-    record_cache: Arc<Mutex<HashMap<usize, CacheEntry>>>,
-    cache_access_queue: Arc<Mutex<VecDeque<usize>>>,
-
-    file_size: u64,
-    estimated_records: Arc<Mutex<usize>>,
-    indexed_to: Arc<Mutex<usize>>,
-    is_fully_indexed: Arc<Mutex<bool>>,
-    file_format: FileFormat,
-
-    indexing_active: Arc<Mutex<bool>>,
-    indexing_cancel: Arc<Mutex<bool>>,
-    preload_hint: Arc<Mutex<Option<usize>>>,
-}
-
-impl HighPerfTsvReader {
-    fn new(path: &str, delimiter: u8, file_format: FileFormat) -> io::Result<Self> {
-        let file = File::open(path)?;
-        let file_size = file.metadata()?.len();
-
-        let estimated_records = Self::rough_estimate_records(&file, file_size)?;
-
-        let header_result = Self::read_header(path, delimiter);
-        let header = match header_result {
-            Ok(h) => h,
-            Err(_) => None,
-        };
-        let has_headers_flag = header.is_some();
-
-        let reader = Self {
-            file_path: path.to_string(),
-            delimiter,
-            header,
-            index_blocks: Arc::new(Mutex::new(HashMap::new())),
-            block_access_queue: Arc::new(Mutex::new(VecDeque::new())),
-            record_cache: Arc::new(Mutex::new(HashMap::new())),
-            cache_access_queue: Arc::new(Mutex::new(VecDeque::new())),
-            file_size,
-            estimated_records: Arc::new(Mutex::new(estimated_records)),
-            indexed_to: Arc::new(Mutex::new(if has_headers_flag { 1 } else { 0 })),
-            is_fully_indexed: Arc::new(Mutex::new(false)),
-            file_format,
-            indexing_active: Arc::new(Mutex::new(false)),
-            indexing_cancel: Arc::new(Mutex::new(false)),
-            preload_hint: Arc::new(Mutex::new(None)),
-        };
-
-        reader.start_background_indexer();
-
-        Ok(reader)
-    }
-
-    fn read_header(path: &str, delimiter: u8) -> io::Result<Option<Vec<String>>> {
-        let file = File::open(path)?;
+    fn parse_csv_line(&self, line: &str, delimiter: u8) -> Option<Vec<String>> {
         let mut reader = ReaderBuilder::new()
             .delimiter(delimiter)
-            .has_headers(true)
-            .quoting(true)
-            .double_quote(true)
-            .escape(Some(b'\\'))
-            .flexible(true)
-            .from_reader(BufReader::new(file));
-
-        match reader.headers() {
-            Ok(headers) => Ok(Some(headers.iter().map(|s| s.to_string()).collect())),
-            Err(_) => Ok(None),
-        }
-    }
-
-    fn rough_estimate_records(file: &File, file_size: u64) -> io::Result<usize> {
-        if file_size > 1_000_000_000 {
-            return Ok((file_size / 500).max(1) as usize);
-        }
-
-        let mut reader = BufReader::new(file);
-        let sample_size = std::cmp::min(10_000_000, file_size as usize);
-        let mut buffer = vec![0; sample_size];
-        let bytes_read = reader.read(&mut buffer)?;
-        buffer.truncate(bytes_read);
-
-        let newline_count = buffer.iter().filter(|&&b| b == b'\n').count();
-        if newline_count == 0 {
-            return Ok(if bytes_read == file_size as usize {
-                1
-            } else {
-                (file_size / bytes_read.max(1) as u64).max(1) as usize
-            });
-        }
-
-        let sample_ratio = file_size as f64 / bytes_read as f64;
-        let estimated = (newline_count as f64 * sample_ratio).ceil() as usize;
-        Ok(estimated.max(1))
-    }
-
-    fn start_background_indexer(&self) {
-        let file_path = self.file_path.clone();
-        let delimiter = self.delimiter;
-
-        let indexed_to_ref = self.indexed_to.clone();
-        let is_fully_indexed_ref = self.is_fully_indexed.clone();
-        let index_blocks_ref = self.index_blocks.clone();
-        let block_queue_ref = self.block_access_queue.clone();
-        let cancel_flag_ref = self.indexing_cancel.clone();
-        let indexing_active_ref = self.indexing_active.clone();
-        let has_header = self.header.is_some();
-        let preload_hint_ref = self.preload_hint.clone();
-        let estimated_records_ref = self.estimated_records.clone();
-
-        thread::spawn(move || {
-            if *indexing_active_ref.lock().unwrap() {
-                return;
-            }
-            *indexing_active_ref.lock().unwrap() = true;
-            *cancel_flag_ref.lock().unwrap() = false;
-
-            let file = match File::open(&file_path) {
-                Ok(f) => f,
-                Err(_) => {
-                    *indexing_active_ref.lock().unwrap() = false;
-                    return;
-                }
-            };
-
-            let mut reader = ReaderBuilder::new()
-                .delimiter(delimiter)
-                .has_headers(false)
-                .quoting(true)
-                .double_quote(true)
-                .escape(Some(b'\\'))
-                .flexible(true)
-                .from_reader(BufReader::new(file));
-
-            let mut current_record_idx: usize = 0;
-            let mut current_pos = Position::new();
-
-            if has_header {
-                if reader.records().next().is_some() {
-                    current_record_idx = 1;
-                    current_pos = reader.position().clone();
-                } else {
-                    *is_fully_indexed_ref.lock().unwrap() = true;
-                    *indexed_to_ref.lock().unwrap() = 1;
-                    *indexing_active_ref.lock().unwrap() = false;
-                    return;
-                }
-            }
-
-            let (resume_from_record, resume_pos) = {
-                let blocks = index_blocks_ref.lock().unwrap();
-                let mut highest_record = current_record_idx;
-                let mut last_pos = current_pos.clone();
-
-                if let Some(max_block_idx) = blocks.keys().max() {
-                    if let Some(last_block) = blocks.get(max_block_idx) {
-                        if !last_block.positions.is_empty() {
-                            let block_end_record =
-                                last_block.start_idx + last_block.positions.len();
-                            if block_end_record > highest_record {
-                                highest_record = block_end_record;
-                                last_pos = last_block.positions.last().unwrap().clone();
-                            }
-                        }
-                    }
-                }
-                (highest_record, last_pos)
-            };
-
-            if resume_from_record > current_record_idx {
-                if reader.seek(resume_pos.clone()).is_ok() {
-                    current_record_idx = resume_from_record;
-                } else {
-                    *indexing_active_ref.lock().unwrap() = false;
-                    return;
-                }
-            }
-
-            loop {
-                if *cancel_flag_ref.lock().unwrap() {
-                    break;
-                }
-
-                let preload_target = { preload_hint_ref.lock().unwrap().take() };
-                let target_block = preload_target.map(|idx| idx / BLOCK_SIZE);
-
-                let current_block_idx = current_record_idx / BLOCK_SIZE;
-                let mut positions_in_block = Vec::with_capacity(BLOCK_SIZE);
-                let block_start_record_idx = current_block_idx * BLOCK_SIZE;
-
-                while positions_in_block.len() < BLOCK_SIZE {
-                    let record_start_pos = reader.position().clone();
-
-                    match reader.records().next() {
-                        Some(Ok(_record)) => {
-                            if current_record_idx / BLOCK_SIZE != current_block_idx {
-                                break;
-                            }
-
-                            positions_in_block.push(record_start_pos);
-                            current_record_idx += 1;
-                        }
-                        Some(Err(_)) => {
-                            *is_fully_indexed_ref.lock().unwrap() = true;
-                            break;
-                        }
-                        None => {
-                            *is_fully_indexed_ref.lock().unwrap() = true;
-                            break;
-                        }
-                    }
-                }
-
-                if !positions_in_block.is_empty() {
-                    let block = IndexBlock {
-                        start_idx: block_start_record_idx,
-                        positions: positions_in_block,
-                        last_access: Instant::now(),
-                    };
-
-                    let mut index_blocks = index_blocks_ref.lock().unwrap();
-                    index_blocks.insert(current_block_idx, block);
-
-                    let mut indexed_to = indexed_to_ref.lock().unwrap();
-                    *indexed_to = std::cmp::max(*indexed_to, current_record_idx);
-
-                    let mut est_records = estimated_records_ref.lock().unwrap();
-                    if current_record_idx > *est_records {
-                        *est_records = current_record_idx + BLOCK_SIZE;
-                    }
-
-                    Self::prune_blocks(&mut index_blocks, &mut block_queue_ref.lock().unwrap());
-                }
-
-                if *is_fully_indexed_ref.lock().unwrap() {
-                    let mut est_records = estimated_records_ref.lock().unwrap();
-                    if current_record_idx > *est_records || *est_records == 0 {
-                        *est_records = current_record_idx;
-                    }
-
-                    let mut indexed_to = indexed_to_ref.lock().unwrap();
-                    *indexed_to = std::cmp::max(*indexed_to, current_record_idx);
-                    break;
-                }
-
-                if target_block.is_none() {
-                    thread::sleep(Duration::from_millis(20));
-                } else {
-                    thread::sleep(Duration::from_millis(5));
-                }
-
-                if let Some(tb) = target_block {
-                    if current_block_idx == tb {}
-                }
-            }
-
-            *indexing_active_ref.lock().unwrap() = false;
-        });
-    }
-
-    fn prune_blocks(blocks: &mut HashMap<usize, IndexBlock>, queue: &mut VecDeque<usize>) {
-        let target_size = CACHE_BLOCKS;
-
-        if blocks.len() <= target_size {
-            return;
-        }
-
-        queue.retain(|&block_idx| blocks.contains_key(&block_idx));
-        let current_keys: HashSet<usize> = blocks.keys().copied().collect();
-        for key in current_keys {
-            if !queue.contains(&key) {
-                queue.push_back(key);
-            }
-        }
-
-        while blocks.len() > target_size {
-            if let Some(idx_to_remove) = queue.pop_front() {
-                if blocks.contains_key(&idx_to_remove) {
-                    blocks.remove(&idx_to_remove);
-                }
-            } else {
-                break;
-            }
-        }
-    }
-
-    fn get_parsed_record_internal(&self, index: usize) -> Option<Vec<String>> {
-        {
-            let mut cache = self.record_cache.lock().unwrap();
-            if let Some(entry) = cache.get_mut(&index) {
-                entry.last_access = Instant::now();
-                let mut access_queue = self.cache_access_queue.lock().unwrap();
-                access_queue.retain(|&x| x != index);
-                access_queue.push_back(index);
-                return Some(entry.record.clone());
-            }
-        }
-
-        let block_index = index / BLOCK_SIZE;
-        let pos_in_block = index % BLOCK_SIZE;
-
-        let position = {
-            let mut blocks = self.index_blocks.lock().unwrap();
-            let mut queue = self.block_access_queue.lock().unwrap();
-
-            if let Some(block) = blocks.get_mut(&block_index) {
-                block.last_access = Instant::now();
-                queue.retain(|&x| x != block_index);
-                queue.push_back(block_index);
-
-                if pos_in_block < block.positions.len() {
-                    Some(block.positions[pos_in_block].clone())
-                } else {
-                    None
-                }
-            } else {
-                if !*self.is_fully_indexed.lock().unwrap() {
-                    *self.preload_hint.lock().unwrap() = Some(index);
-                }
-
-                None
-            }
-        };
-
-        if let Some(pos) = position {
-            if let Some(record_data) = self.load_record_at_position(pos) {
-                let mut cache = self.record_cache.lock().unwrap();
-                let mut access_queue = self.cache_access_queue.lock().unwrap();
-
-                cache.insert(
-                    index,
-                    CacheEntry {
-                        record: record_data.clone(),
-                        last_access: Instant::now(),
-                    },
-                );
-                access_queue.retain(|&x| x != index);
-                access_queue.push_back(index);
-
-                self.prune_cache(&mut cache, &mut access_queue);
-
-                return Some(record_data);
-            }
-        }
-
-        if !*self.is_fully_indexed.lock().unwrap() && index >= *self.indexed_to.lock().unwrap() {
-            *self.preload_hint.lock().unwrap() = Some(index);
-            let mut est_records = self.estimated_records.lock().unwrap();
-            if index >= *est_records {
-                *est_records = index + BLOCK_SIZE * 2;
-            }
-        }
-
-        None
-    }
-
-    fn load_record_at_position(&self, position: Position) -> Option<Vec<String>> {
-        let file = match File::open(&self.file_path) {
-            Ok(f) => f,
-            Err(_) => return None,
-        };
-
-        let mut reader = ReaderBuilder::new()
-            .delimiter(self.delimiter)
             .has_headers(false)
             .quoting(true)
             .double_quote(true)
             .escape(Some(b'\\'))
             .flexible(true)
-            .from_reader(BufReader::new(file));
+            .from_reader(line.as_bytes());
 
-        if reader.seek(position).is_err() {
-            return None;
+        let mut record = StringRecord::new();
+        if reader.read_record(&mut record).ok()? {
+            Some(record.iter().map(String::from).collect())
+        } else {
+            None
+        }
+    }
+
+    fn get_parsed_record_internal(&self, index: usize) -> Option<Vec<String>> {
+        // Check cache first
+        {
+            let mut cache = self.record_cache.lock().unwrap();
+            if let Some(entry) = cache.get_mut(&index) {
+                entry.last_access = Instant::now();
+
+                // Update LRU queue
+                let mut access_queue = self.cache_access_queue.lock().unwrap();
+                access_queue.retain(|&x| x != index);
+                access_queue.push_back(index);
+
+                return Some(entry.record.clone());
+            }
         }
 
-        match reader.records().next() {
-            Some(Ok(record)) => Some(record.iter().map(|s| s.to_string()).collect()),
-            _ => None,
+        // Cache miss - load and parse the record
+        let raw_line = self.get_raw_line(index)?;
+
+        let parsed_record = match self.file_format {
+            FileFormat::JSONL => vec![raw_line.clone()],
+            FileFormat::CSV | FileFormat::TSV => {
+                let delimiter = self.file_format.delimiter().unwrap_or(b',');
+                match self.parse_csv_line(&raw_line, delimiter) {
+                    Some(fields) => fields,
+                    None => vec![raw_line.clone()], // Fallback if parsing fails
+                }
+            }
+        };
+
+        // Add to cache
+        {
+            let mut cache = self.record_cache.lock().unwrap();
+            let mut access_queue = self.cache_access_queue.lock().unwrap();
+
+            cache.insert(
+                index,
+                CacheEntry {
+                    record: parsed_record.clone(),
+                    last_access: Instant::now(),
+                },
+            );
+
+            access_queue.retain(|&x| x != index);
+            access_queue.push_back(index);
+
+            // Prune cache if necessary
+            self.prune_cache(&mut cache, &mut access_queue);
         }
+
+        Some(parsed_record)
     }
 
     fn prune_cache(&self, cache: &mut HashMap<usize, CacheEntry>, queue: &mut VecDeque<usize>) {
@@ -642,78 +386,102 @@ impl HighPerfTsvReader {
             return;
         }
 
-        queue.retain(|&idx| cache.contains_key(&idx));
+        // Ensure queue consistency
         let current_keys: HashSet<usize> = cache.keys().copied().collect();
+        queue.retain(|&idx| current_keys.contains(&idx));
+
         for key in current_keys {
             if !queue.contains(&key) {
                 queue.push_back(key);
             }
         }
 
-        if self.file_size > EXTREMELY_LARGE_FILE_SIZE && cache.len() > effective_cache_size * 2 {
-            let mut entries: Vec<_> = cache.iter().collect();
-            entries.sort_by(|a, b| b.1.last_access.cmp(&a.1.last_access));
-
-            let to_keep_count = effective_cache_size / 2;
-
-            let keys_to_keep: HashSet<usize> = entries
-                .iter()
-                .take(to_keep_count)
-                .map(|(k_ref, _)| **k_ref)
-                .collect();
-
-            cache.retain(|k, _| keys_to_keep.contains(k));
-
-            queue.clear();
-
-            for &key in cache.keys() {
-                queue.push_back(key);
-            }
-            return;
-        }
-
+        // Remove oldest entries
         while cache.len() > effective_cache_size {
             if let Some(idx_to_remove) = queue.pop_front() {
                 if cache.contains_key(&idx_to_remove) {
                     cache.remove(&idx_to_remove);
                 }
             } else {
-                break;
+                // Inconsistency recovery
+                if let Some(key_to_remove) = cache.keys().next().cloned() {
+                    cache.remove(&key_to_remove);
+                } else {
+                    break;
+                }
             }
         }
     }
 
-    fn get_raw_record_string(&self, index: usize) -> Option<String> {
-        self.get_parsed_record_internal(index)
-            .map(|record| record.join(&String::from_utf8_lossy(&[self.delimiter])))
-    }
-
     fn is_record_match(&self, index: usize, term: &str, case_sensitive: bool) -> bool {
         if let Some(record) = self.get_parsed_record_internal(index) {
+            // For CSV/TSV check each field
+            let search_term = if case_sensitive {
+                term.to_string()
+            } else {
+                term.to_lowercase()
+            };
+
             for field in record {
-                let field_match = if case_sensitive {
-                    field.contains(term)
+                let field_to_check = if case_sensitive {
+                    field.clone()
                 } else {
-                    field.to_lowercase().contains(&term.to_lowercase())
+                    field.to_lowercase()
                 };
-                if field_match {
+                if field_to_check.contains(&search_term) {
                     return true;
                 }
             }
         }
         false
     }
+
+    fn estimate_parsed_height(&self, index: usize, text_wrapping: bool, max_width: f32) -> f32 {
+        if let Some(record) = self.get_parsed_record_internal(index) {
+            let base_height = 30.0;
+            let row_height = EXPANDED_TABLE_ROW_HEIGHT;
+
+            match self.file_format {
+                FileFormat::JSONL => EXPANDED_JSON_HEIGHT,
+                FileFormat::CSV | FileFormat::TSV => {
+                    if text_wrapping {
+                        // Estimate lines needed based on width
+                        let approx_chars_per_line = (max_width / 8.0).max(10.0) as usize;
+                        let total_lines: usize = record
+                            .iter()
+                            .map(|field| {
+                                // Calculate lines needed for this field
+                                let field_len = field.chars().count();
+                                // Add 1 for the field name row, then lines for value
+                                1 + (field_len + approx_chars_per_line - 1) / approx_chars_per_line
+                            })
+                            .sum();
+
+                        (base_height + total_lines as f32 * row_height).max(EXPANDED_ROW_MIN_HEIGHT)
+                    } else {
+                        // Height based on number of fields
+                        (base_height + record.len() as f32 * row_height)
+                            .max(EXPANDED_ROW_MIN_HEIGHT)
+                    }
+                }
+            }
+        } else {
+            EXPANDED_ROW_MIN_HEIGHT
+        }
+    }
 }
 
-impl FormatReader for HighPerfTsvReader {
+impl FormatReader for UnifiedReader {
     fn total_records(&self) -> usize {
-        let estimate = *self.estimated_records.lock().unwrap();
-        let indexed = *self.indexed_to.lock().unwrap();
-        std::cmp::max(estimate, indexed)
+        if self.offsets.len() < 2 {
+            0
+        } else {
+            self.offsets.len() - 1
+        }
     }
 
     fn get_record(&self, index: usize) -> Option<String> {
-        self.get_raw_record_string(index)
+        self.get_raw_line(index)
     }
 
     fn get_parsed_record(&self, index: usize) -> Option<Vec<String>> {
@@ -736,37 +504,12 @@ impl FormatReader for HighPerfTsvReader {
         self.file_format
     }
 
-    fn preload_around(&self, index: usize) {
-        if !*self.is_fully_indexed.lock().unwrap() {
-            *self.preload_hint.lock().unwrap() = Some(index);
-        }
+    fn preload_around(&self, _index: usize) {
+        // No-op in this implementation
     }
 
     fn estimate_parsed_height(&self, index: usize, text_wrapping: bool, max_width: f32) -> f32 {
-        if let Some(record) = self.get_parsed_record_internal(index) {
-            if text_wrapping {
-                let approx_chars_per_line = (max_width / 8.0).max(10.0) as usize;
-                let total_lines: usize = record
-                    .iter()
-                    .map(|field| {
-                        (field.chars().count() + approx_chars_per_line - 1) / approx_chars_per_line
-                    })
-                    .sum();
-
-                (30.0 + total_lines as f32 * EXPANDED_TABLE_ROW_HEIGHT).max(EXPANDED_ROW_MIN_HEIGHT)
-            } else {
-                (30.0 + record.len() as f32 * EXPANDED_TABLE_ROW_HEIGHT)
-                    .max(EXPANDED_ROW_MIN_HEIGHT)
-            }
-        } else {
-            EXPANDED_ROW_MIN_HEIGHT
-        }
-    }
-}
-
-impl Drop for HighPerfTsvReader {
-    fn drop(&mut self) {
-        *self.indexing_cancel.lock().unwrap() = true;
+        self.estimate_parsed_height(index, text_wrapping, max_width)
     }
 }
 
@@ -888,29 +631,15 @@ impl JsonlViewer {
 
         let path_clone = path.to_string();
         let format = self.file_format;
-        let file_handle = file;
 
         thread::spawn(move || {
-            let reader_result: io::Result<Arc<dyn FormatReader>> = match format {
-                FileFormat::JSONL => {
-                    JsonlReader::new(&file_handle).map(|r| Arc::new(r) as Arc<dyn FormatReader>)
-                }
-                FileFormat::CSV | FileFormat::TSV => {
-                    let delimiter = format.delimiter().unwrap_or(b',');
-
-                    HighPerfTsvReader::new(&path_clone, delimiter, format)
-                        .map(|r| Arc::new(r) as Arc<dyn FormatReader>)
-                }
+            let reader_result = match File::open(&path_clone) {
+                Ok(file) => UnifiedReader::new(&file, &path_clone, format)
+                    .map(|r| Arc::new(r) as Arc<dyn FormatReader>),
+                Err(e) => Err(e),
             };
 
-            match reader_result {
-                Ok(reader) => {
-                    let _ = sender.send(Ok(reader));
-                }
-                Err(e) => {
-                    let _ = sender.send(Err(e));
-                }
-            }
+            let _ = sender.send(reader_result);
         });
 
         Ok(())
@@ -992,10 +721,6 @@ impl JsonlViewer {
                 self.search.match_indices = self.search.matches.iter().copied().collect();
                 self.search.match_indices.sort_unstable();
                 self.search.count = self.search.match_indices.len();
-
-                if self.search.count > 0 || self.search.in_progress {
-                    if self.search_receiver.is_some() {}
-                }
             }
 
             if let Err(mpsc::TryRecvError::Disconnected) = receiver.try_recv() {
@@ -1261,8 +986,6 @@ impl JsonlViewer {
         }
 
         self.previous_height_cache.retain(|&k, _| k <= row);
-
-        self.previous_height_cache.clear();
     }
 
     fn render_tabular_view(&self, ui: &mut Ui, row: usize) {
@@ -1403,7 +1126,7 @@ impl JsonlViewer {
                 egui::StrokeKind::Outside,
             );
 
-            let mut child_ui = ui.child_ui(rect, *ui.layout(), None);
+            let mut child_ui = ui.new_child(UiBuilder::new().max_rect(rect));
 
             frame.show(&mut child_ui, |ui| {
                 ui.horizontal(|ui| {
@@ -1506,10 +1229,11 @@ impl JsonlViewer {
                     }
                 }
             });
-        } else {
         }
 
-        if response.clicked() && !response.hovered() {}
+        if response.clicked() && !response.hovered() {
+            // Empty handler for click outside of expand button
+        }
     }
 
     fn create_preview(
@@ -1685,7 +1409,7 @@ impl eframe::App for JsonlViewer {
                                 "Loaded {} ~{} records ({})",
                                 self.file_path
                                     .as_ref()
-                                    .map(|p| std::path::Path::new(p)
+                                    .map(|p| Path::new(p)
                                         .file_name()
                                         .unwrap_or_default()
                                         .to_string_lossy())
@@ -1727,7 +1451,7 @@ impl eframe::App for JsonlViewer {
                 }
 
                 if let Some(path) = &self.file_path {
-                    let filename = std::path::Path::new(path)
+                    let filename = Path::new(path)
                         .file_name()
                         .unwrap_or_default()
                         .to_string_lossy();
@@ -2033,15 +1757,9 @@ impl eframe::App for JsonlViewer {
             || self.stabilize_counter > 0
         {
             ctx.request_repaint();
-        } else {
-            if self.file_size > 10_000_000_000 {
-            } else if self.file_size > 1_000_000_000 {
-            }
         }
     }
 }
-
-use env_logger;
 
 fn main() -> Result<(), eframe::Error> {
     env_logger::init();
@@ -2051,7 +1769,6 @@ fn main() -> Result<(), eframe::Error> {
             .with_inner_size([1200.0, 800.0])
             .with_min_inner_size([600.0, 400.0])
             .with_title("JSLON - High-Performance File Viewer"),
-
         ..Default::default()
     };
 
@@ -2060,7 +1777,6 @@ fn main() -> Result<(), eframe::Error> {
         options,
         Box::new(|cc| {
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
-
             Ok(Box::new(JsonlViewer::new()))
         }),
     )
