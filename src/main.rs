@@ -1395,6 +1395,14 @@ impl eframe::App for JsonlViewer {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let render_start = Instant::now();
 
+        for dropped_file in ctx.input(|i| i.raw.dropped_files.clone()) {
+            if let Some(path) = dropped_file.path {
+                if let Some(path_str) = path.to_str() {
+                    let _ = self.open_file(path_str);
+                }
+            }
+        }
+
         if let Some(receiver) = &self.format_reader_receiver {
             if let Ok(result) = receiver.try_recv() {
                 match result {
