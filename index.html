@@ -312,11 +312,11 @@
                     <br>
                     <a href="#" class="btn" style="margin-top: 10px;">Download .rpm</a>
                 </div> -->
-                <!-- <div class="download-card">
+                <div class="download-card">
                     <div class="platform-icon">🍎</div>
                     <div class="platform-name">macOS</div>
-                    <a href="#" class="btn">Download .app</a>
-                </div> -->
+                    <a href="./bins/JSLON.app" class="btn">Download .app</a>
+                </div>
                 <div class="download-card">
                     <div class="platform-icon">🪟</div>
                     <div class="platform-name">Windows</div>
@@ -394,7 +394,10 @@ cargo run --release</pre>
 
     <footer>
         <div class="container">
-            <p>© 2025 JSLON - A project by skirdey-inflection</p>
+            <p>© <span id="current-year"></span> JSLON - A project by skirdey-inflection</p>
+            <script>
+                document.getElementById('current-year').textContent = new Date().getFullYear();
+            </script>
             <div class="footer-links">
                 <a href="https://github.com/skirdey-inflection/jslon">GitHub</a>
                 <a href="https://github.com/skirdey-inflection/jslon/issues">Report Issues</a>
