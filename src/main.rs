@@ -1,4 +1,5 @@
 #![allow(clippy::collapsible_else_if)]
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 use csv::{ReaderBuilder, StringRecord};
 use eframe::egui::{self, RichText, Ui};
@@ -15,19 +16,12 @@ use std::time::{Duration, Instant};
 
 const EXTREMELY_LARGE_FILE_SIZE: u64 = 50_000_000_000;
 const LARGE_FILE_CACHE_SIZE: usize = 500;
-
 const COLLAPSED_HEIGHT: f32 = 24.0;
-
-const EXPANDED_HEIGHT: f32 = 120.0;
 const EXPANDED_ROW_MIN_HEIGHT: f32 = 100.0;
 const EXPANDED_JSON_HEIGHT: f32 = 400.0;
 const EXPANDED_TABLE_ROW_HEIGHT: f32 = 20.0;
-
 const BUFFER_HEIGHT: f32 = 5000.0;
-
-const BLOCK_SIZE: usize = 1000;
 const CACHE_SIZE: usize = 10_000;
-const CACHE_BLOCKS: usize = 50;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FileFormat {
