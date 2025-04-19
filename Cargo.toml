@@ -17,8 +17,23 @@ env_logger = "0.11"
 [package.metadata.bundle]
 name = "JSLON"
 identifier = "com.skirdey.JSLON"
-icon = ["path/to/icon.png"]
+icon = ["assets/jslon.icns"]
+resources = ["assets"]
 version = "0.1.0"
 copyright = "Copyright (c) 2025 Stanislav Kirdey"
 category = "Developer Tool"
 short_description = "Fast JSONL, CSV and TSV file viewer"
+
+
+[package.metadata.bundle.mac]
+name              = "JSLON"
+identifier        = "com.skirdey.JSLON"
+category          = "public.app‑category.developer‑tools"
+version           = "0.1.0"
+
+document_types = [
+    { name = "JSON Lines File", extensions = ["jsonl","jl"], role = "Viewer", types = ["public.plain-text"] },
+    { name = "Comma-Separated Values", extensions = ["csv"], role = "Viewer", types = ["public.comma-separated-values-text", "public.plain-text"] },
+    { name = "Tab-Separated Values", extensions = ["tsv","tab"], role = "Viewer", types = ["public.tab-separated-values-text", "public.plain-text"] },
+    { name = "Plain Text", extensions = ["txt","log"], role = "Viewer", types = ["public.plain-text"] },
+]
