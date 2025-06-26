@@ -1766,6 +1766,14 @@ impl eframe::App for JsonlViewer {
 fn main() -> Result<(), eframe::Error> {
     env_logger::init();
 
+    // Get command line arguments
+    let args: Vec<String> = std::env::args().collect();
+    let initial_file = if args.len() > 1 {
+        Some(args[1].clone())
+    } else {
+        None
+    };
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1200.0, 800.0])
@@ -1777,9 +1785,16 @@ fn main() -> Result<(), eframe::Error> {
     eframe::run_native(
         "JSLON Viewer",
         options,
-        Box::new(|cc| {
+        Box::new(move |cc| {
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
-            Ok(Box::new(JsonlViewer::new()))
+            let mut viewer = JsonlViewer::new();
+            
+            // Open initial file if provided
+            if let Some(file_path) = initial_file {
+                let _ = viewer.open_file(&file_path);
+            }
+            
+            Ok(Box::new(viewer))
         }),
     )
 }
