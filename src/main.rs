@@ -1196,16 +1196,17 @@ impl JsonlViewer {
                                     .id_salt(format!("json_scroll_{}", row))
                                     .show(ui, |ui| {
                                         ui.add(
-                                            egui::TextEdit::multiline(&mut pretty_json.clone())
-                                                .font(egui::TextStyle::Monospace)
-                                                .text_color(if self.dark_mode {
-                                                    egui::Color32::LIGHT_GRAY
-                                                } else {
-                                                    egui::Color32::DARK_GRAY
-                                                })
-                                                .desired_width(f32::INFINITY)
-                                                .interactive(false)
-                                                .frame(false),
+                                            egui::Label::new(
+                                                RichText::new(pretty_json)
+                                                    .font(egui::FontId::monospace(12.0))
+                                                    .color(if self.dark_mode {
+                                                        egui::Color32::LIGHT_GRAY
+                                                    } else {
+                                                        egui::Color32::DARK_GRAY
+                                                    })
+                                            )
+                                            .selectable(true)
+                                            .wrap()
                                         );
                                     });
                             } else {
