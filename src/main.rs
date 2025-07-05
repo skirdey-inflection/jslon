@@ -13,6 +13,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
+use std::any::Any;
 
 const EXTREMELY_LARGE_FILE_SIZE: u64 = 50_000_000_000;
 const LARGE_FILE_CACHE_SIZE: usize = 500;
@@ -75,7 +76,7 @@ struct CacheEntry {
     last_access: Instant,
 }
 
-trait FormatReader: Send + Sync {
+trait FormatReader: Send + Sync + Any {
     fn total_records(&self) -> usize;
     fn get_record(&self, index: usize) -> Option<String>;
     fn get_parsed_record(&self, index: usize) -> Option<Vec<String>>;
@@ -85,6 +86,7 @@ trait FormatReader: Send + Sync {
     fn format(&self) -> FileFormat;
     fn preload_around(&self, index: usize);
     fn estimate_parsed_height(&self, index: usize, text_wrapping: bool, max_width: f32) -> f32;
+    fn as_any(&self) -> &dyn Any;
 }
 
 struct UnifiedReader {
@@ -139,7 +141,7 @@ impl UnifiedReader {
     }
 
     // Add this new method to the UnifiedReader implementation
-    fn build_csv_offsets(mmap: &Mmap, delimiter: u8) -> Vec<usize> {
+    fn build_csv_offsets(mmap: &Mmap, _delimiter: u8) -> Vec<usize> {
         let mut offsets = vec![0];
         let mut in_quotes = false;
         let quote_char = b'"'; // Standard quote character for CSV
@@ -408,22 +410,40 @@ impl UnifiedReader {
     }
 
     fn is_record_match(&self, index: usize, term: &str, case_sensitive: bool) -> bool {
-        if let Some(record) = self.get_parsed_record_internal(index) {
-            // For CSV/TSV check each field
-            let search_term = if case_sensitive {
+        // Fast raw check first
+        if let Some(raw_line) = self.get_raw_line(index) {
+            let search_needle = if case_sensitive {
                 term.to_string()
             } else {
                 term.to_lowercase()
             };
-
-            for field in record {
-                let field_to_check = if case_sensitive {
-                    field.clone()
-                } else {
-                    field.to_lowercase()
-                };
-                if field_to_check.contains(&search_term) {
-                    return true;
+            
+            let line_to_search = if case_sensitive {
+                raw_line.clone()
+            } else {
+                raw_line.to_lowercase()
+            };
+            
+            if !line_to_search.contains(&search_needle) {
+                return false;
+            }
+            
+            // For JSONL, raw match is sufficient
+            if matches!(self.file_format, FileFormat::JSONL) {
+                return true;
+            }
+            
+            // For CSV/TSV, do refined field search
+            if let Some(fields) = self.get_parsed_record_internal(index) {
+                for field in fields {
+                    let field_to_check = if case_sensitive {
+                        field
+                    } else {
+                        field.to_lowercase()
+                    };
+                    if field_to_check.contains(&search_needle) {
+                        return true;
+                    }
                 }
             }
         }
@@ -462,6 +482,164 @@ impl UnifiedReader {
         } else {
             EXPANDED_ROW_MIN_HEIGHT
         }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn fast_raw_search(&self, term: &str, case_sensitive: bool) -> HashSet<usize> {
+        let mut matches = HashSet::new();
+        let total_records = self.total_records();
+        
+        // Prepare search term once
+        let search_needle = if case_sensitive {
+            term.to_string()
+        } else {
+            term.to_lowercase()
+        };
+        
+        // For very large files, use parallel search
+        if self.file_size > 1_000_000_000 && total_records > 10_000 {
+            matches = self.parallel_raw_search(&search_needle, case_sensitive, total_records);
+        } else {
+            matches = self.sequential_raw_search(&search_needle, case_sensitive, total_records);
+        }
+        
+        matches
+    }
+    
+    fn sequential_raw_search(&self, search_needle: &str, case_sensitive: bool, total_records: usize) -> HashSet<usize> {
+        let mut matches = HashSet::new();
+        
+        for row in 0..total_records {
+            if let Some(raw_line) = self.get_raw_line(row) {
+                let line_to_search = if case_sensitive {
+                    raw_line
+                } else {
+                    raw_line.to_lowercase()
+                };
+                
+                if line_to_search.contains(search_needle) {
+                    matches.insert(row);
+                }
+            }
+        }
+        
+        matches
+    }
+    
+    fn parallel_raw_search(&self, search_needle: &str, case_sensitive: bool, total_records: usize) -> HashSet<usize> {
+        use std::sync::Arc;
+        use std::thread;
+        
+        let num_threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(8);
+        let chunk_size = (total_records + num_threads - 1) / num_threads;
+        let search_needle = Arc::new(search_needle.to_string());
+        let mmap = self.mmap.clone();
+        let offsets = self.offsets.clone();
+        
+        let mut handles = Vec::new();
+        
+        for thread_id in 0..num_threads {
+            let start_row = thread_id * chunk_size;
+            let end_row = ((thread_id + 1) * chunk_size).min(total_records);
+            
+            if start_row >= total_records {
+                break;
+            }
+            
+            let search_needle = search_needle.clone();
+            let mmap = mmap.clone();
+            let offsets = offsets.clone();
+            
+            let handle = thread::spawn(move || {
+                let mut local_matches = HashSet::new();
+                
+                for row in start_row..end_row {
+                    if row + 1 < offsets.len() {
+                        let start = offsets[row];
+                        let end = offsets[row + 1];
+                        
+                        // Trim trailing newlines
+                        let mut actual_end = end;
+                        while actual_end > start
+                            && (mmap[actual_end - 1] == b'\n' || mmap[actual_end - 1] == b'\r')
+                        {
+                            actual_end -= 1;
+                        }
+                        
+                        if start <= actual_end {
+                            if let Ok(line) = std::str::from_utf8(&mmap[start..actual_end]) {
+                                let line_to_search = if case_sensitive {
+                                    line.to_string()
+                                } else {
+                                    line.to_lowercase()
+                                };
+                                
+                                if line_to_search.contains(search_needle.as_str()) {
+                                    local_matches.insert(row);
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                local_matches
+            });
+            
+            handles.push(handle);
+        }
+        
+        // Collect results
+        let mut all_matches = HashSet::new();
+        for handle in handles {
+            if let Ok(local_matches) = handle.join() {
+                all_matches.extend(local_matches);
+            }
+        }
+        
+        all_matches
+    }
+    
+    fn refined_field_search(&self, potential_matches: HashSet<usize>, term: &str, case_sensitive: bool) -> HashSet<usize> {
+        let mut confirmed_matches = HashSet::new();
+        let search_term = if case_sensitive {
+            term.to_string()
+        } else {
+            term.to_lowercase()
+        };
+        
+        // Only for CSV/TSV files, refine the search by checking individual fields
+        if matches!(self.file_format, FileFormat::CSV | FileFormat::TSV) {
+            for &row in &potential_matches {
+                if let Some(fields) = self.get_parsed_record_internal(row) {
+                    let mut found_in_field = false;
+                    for field in fields {
+                        let field_to_check = if case_sensitive {
+                            field
+                        } else {
+                            field.to_lowercase()
+                        };
+                        if field_to_check.contains(&search_term) {
+                            found_in_field = true;
+                            break;
+                        }
+                    }
+                    if found_in_field {
+                        confirmed_matches.insert(row);
+                    }
+                } else {
+                    // If we can't parse, include it anyway since raw search found it
+                    confirmed_matches.insert(row);
+                }
+            }
+        } else {
+            // For JSONL, raw search is sufficient
+            confirmed_matches = potential_matches;
+        }
+        
+        confirmed_matches
     }
 }
 
@@ -504,6 +682,10 @@ impl FormatReader for UnifiedReader {
 
     fn estimate_parsed_height(&self, index: usize, text_wrapping: bool, max_width: f32) -> f32 {
         self.estimate_parsed_height(index, text_wrapping, max_width)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
@@ -662,9 +844,9 @@ impl JsonlViewer {
             let total_records = reader.total_records();
 
             let search_limit = if self.file_size > 10_000_000_000 {
-                (total_records as u64).min(50_000)
+                (total_records as u64).min(100_000) // Increased limit since search is faster
             } else if self.file_size > 1_000_000_000 {
-                (total_records as u64).min(200_000)
+                (total_records as u64).min(500_000)
             } else {
                 total_records as u64
             };
@@ -672,29 +854,56 @@ impl JsonlViewer {
             let (sender, receiver) = mpsc::channel();
             self.search_receiver = Some(receiver);
 
+            // Use optimized search in background thread
             thread::spawn(move || {
-                let mut matches = HashSet::new();
                 let _start_time = Instant::now();
-                let mut last_send_time = Instant::now();
-
-                for row in 0..(search_limit as usize) {
-                    if reader.is_match(row, &search_term, case_sensitive) {
-                        matches.insert(row);
-                    }
-
-                    if row % 5000 == 0 && last_send_time.elapsed() > Duration::from_millis(100) {
-                        if sender.send(matches.clone()).is_err() {
-                            break;
+                
+                // Fix: Use as_any() first, then downcast_ref
+                if let Some(unified_reader) = reader.as_any().downcast_ref::<UnifiedReader>() {
+                    // Step 1: Fast raw string search
+                    let potential_matches = unified_reader.fast_raw_search(&search_term, case_sensitive);
+                    
+                    // Send intermediate results
+                    let _ = sender.send(potential_matches.clone());
+                    
+                    // Step 2: For CSV/TSV, refine with field-level search if needed
+                    let final_matches = if matches!(unified_reader.file_format, FileFormat::CSV | FileFormat::TSV) {
+                        // Only refine if we have a reasonable number of potential matches
+                        if potential_matches.len() <= 10_000 {
+                            unified_reader.refined_field_search(potential_matches, &search_term, case_sensitive)
+                        } else {
+                            // Too many matches, stick with raw search for performance
+                            potential_matches
                         }
-                        last_send_time = Instant::now();
+                    } else {
+                        potential_matches
+                    };
+                    
+                    let _ = sender.send(final_matches);
+                } else {
+                    // Fallback to original method for other reader types
+                    let mut matches = HashSet::new();
+                    let mut last_send_time = Instant::now();
+
+                    for row in 0..(search_limit as usize) {
+                        if reader.is_match(row, &search_term, case_sensitive) {
+                            matches.insert(row);
+                        }
+
+                        if row % 5000 == 0 && last_send_time.elapsed() > Duration::from_millis(100) {
+                            if sender.send(matches.clone()).is_err() {
+                                break;
+                            }
+                            last_send_time = Instant::now();
+                        }
+
+                        if row % 10000 == 0 {
+                            thread::sleep(Duration::from_millis(1));
+                        }
                     }
 
-                    if row % 10000 == 0 {
-                        thread::sleep(Duration::from_millis(1));
-                    }
+                    let _ = sender.send(matches);
                 }
-
-                let _ = sender.send(matches);
             });
         } else {
             self.search.in_progress = false;
@@ -997,7 +1206,7 @@ impl JsonlViewer {
                 }
 
                 let headers = reader.get_header();
-                let _num_columns = fields.len();
+                let is_match = self.search.matches.contains(&row);
 
                 egui::Grid::new(format!("row_{}_grid", row))
                     .striped(true)
@@ -1023,20 +1232,33 @@ impl JsonlViewer {
                                 },
                             ));
 
-                            let text_color = if self.dark_mode {
-                                egui::Color32::LIGHT_GRAY
+                            // Apply highlighting to field values if this row matches search
+                            if is_match && !self.search.term.is_empty() {
+                                if self.text_wrapping {
+                                    // For wrapped text, we need a different approach
+                                    ui.vertical(|ui| {
+                                        ui.set_max_width(self.max_column_width);
+                                        self.render_highlighted_text(ui, field_value, &self.search.term);
+                                    });
+                                } else {
+                                    self.render_highlighted_text(ui, field_value, &self.search.term);
+                                }
                             } else {
-                                egui::Color32::DARK_GRAY
-                            };
-                            if self.text_wrapping {
-                                ui.add(
-                                    egui::Label::new(
-                                        RichText::new(field_value).monospace().color(text_color),
-                                    )
-                                    .wrap(),
-                                );
-                            } else {
-                                ui.label(RichText::new(field_value).monospace().color(text_color));
+                                let text_color = if self.dark_mode {
+                                    egui::Color32::LIGHT_GRAY
+                                } else {
+                                    egui::Color32::DARK_GRAY
+                                };
+                                if self.text_wrapping {
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(field_value).monospace().color(text_color),
+                                        )
+                                        .wrap(),
+                                    );
+                                } else {
+                                    ui.label(RichText::new(field_value).monospace().color(text_color));
+                                }
                             }
                             ui.end_row();
                         }
@@ -1195,19 +1417,24 @@ impl JsonlViewer {
                                     .max_height(outer_height - COLLAPSED_HEIGHT.max(25.0))
                                     .id_salt(format!("json_scroll_{}", row))
                                     .show(ui, |ui| {
-                                        ui.add(
-                                            egui::Label::new(
-                                                RichText::new(pretty_json)
-                                                    .font(egui::FontId::monospace(12.0))
-                                                    .color(if self.dark_mode {
-                                                        egui::Color32::LIGHT_GRAY
-                                                    } else {
-                                                        egui::Color32::DARK_GRAY
-                                                    })
-                                            )
-                                            .selectable(true)
-                                            .wrap()
-                                        );
+                                        // Apply highlighting to expanded JSON content if this row matches search
+                                        if is_match && !self.search.term.is_empty() {
+                                            self.render_highlighted_text(ui, pretty_json, &self.search.term);
+                                        } else {
+                                            ui.add(
+                                                egui::Label::new(
+                                                    RichText::new(pretty_json)
+                                                        .font(egui::FontId::monospace(12.0))
+                                                        .color(if self.dark_mode {
+                                                            egui::Color32::LIGHT_GRAY
+                                                        } else {
+                                                            egui::Color32::DARK_GRAY
+                                                        })
+                                                )
+                                                .selectable(true)
+                                                .wrap()
+                                            );
+                                        }
                                     });
                             } else {
                                 ui.spinner();
@@ -1284,33 +1511,43 @@ impl JsonlViewer {
             egui::FontId::monospace(ui.style().text_styles[&egui::TextStyle::Monospace].size);
 
         let mut layout = egui::text::LayoutJob::default();
-        let term_len = search_term.len();
 
-        if term_len == 0 {
+        if search_term.is_empty() {
             layout.append(
                 text,
                 0.0,
                 egui::TextFormat::simple(font_id.clone(), normal_text_color),
             );
         } else {
-            let mut last_end = 0;
-            let text_lower;
-            let term_lower;
-            let search_haystack = if self.search.case_sensitive {
-                text
+            // Fix: Find matches correctly for both case-sensitive and case-insensitive search
+            let mut matches = Vec::new();
+            
+            if self.search.case_sensitive {
+                // Case-sensitive: direct matching
+                for (start, matched_text) in text.match_indices(search_term) {
+                    matches.push((start, start + matched_text.len()));
+                }
             } else {
-                text_lower = text.to_lowercase();
-                &text_lower
-            };
-            let search_needle = if self.search.case_sensitive {
-                search_term
-            } else {
-                term_lower = search_term.to_lowercase();
-                &term_lower
-            };
+                // Case-insensitive: use a different approach
+                let text_lower = text.to_lowercase();
+                let search_lower = search_term.to_lowercase();
+                
+                // Find matches in lowercase version, but track original positions
+                let mut search_start = 0;
+                while let Some(found_pos) = text_lower[search_start..].find(&search_lower) {
+                    let actual_start = search_start + found_pos;
+                    let actual_end = actual_start + search_term.len(); // Use original search term length
+                    matches.push((actual_start, actual_end));
+                    search_start = actual_end;
+                }
+            }
 
-            for (start, _match) in search_haystack.match_indices(search_needle) {
-                let end = start + term_len;
+            // Sort matches by start position
+            matches.sort_by_key(|&(start, _)| start);
+
+            let mut last_end = 0;
+            for (start, end) in matches {
+                // Add text before the match
                 if start > last_end {
                     layout.append(
                         &text[last_end..start],
@@ -1319,19 +1556,23 @@ impl JsonlViewer {
                     );
                 }
 
-                layout.append(
-                    &text[start..end],
-                    0.0,
-                    egui::TextFormat {
-                        font_id: font_id.clone(),
-                        color: highlight_text_color,
-                        background: highlight_color,
-                        ..Default::default()
-                    },
-                );
-                last_end = end;
+                // Add highlighted match (preserve original casing)
+                if end <= text.len() {
+                    layout.append(
+                        &text[start..end],
+                        0.0,
+                        egui::TextFormat {
+                            font_id: font_id.clone(),
+                            color: highlight_text_color,
+                            background: highlight_color,
+                            ..Default::default()
+                        },
+                    );
+                    last_end = end;
+                }
             }
 
+            // Add remaining text after last match
             if last_end < text.len() {
                 layout.append(
                     &text[last_end..],
